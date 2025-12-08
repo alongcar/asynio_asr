@@ -147,7 +147,7 @@ from contextlib import asynccontextmanager
 from queue import Queue, Empty, Full
 
 import os
-import pyaudio
+# import pyaudio
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -193,11 +193,11 @@ class VoskASRServer:
                 max_workers = (os.cpu_count() or 1) + 1
         self.max_workers = max_workers
 
-        # 添加音频播放功能
-        self.audio_player = None
-        self.playback_enabled = True  # 可配置，是否开启播放
-        self.playback_stream = None
-        self.setup_audio_playback(int(sample_rate))
+        # # 添加音频播放功能
+        # self.audio_player = None
+        # self.playback_enabled = True  # 可配置，是否开启播放
+        # self.playback_stream = None
+        # # self.setup_audio_playback(int(sample_rate))
 
         # 加载Vosk模型
         logger.info(f"加载Vosk模型: {model_path}")
@@ -225,42 +225,42 @@ class VoskASRServer:
         # 启动工作线程
         self._start_workers()
 
-    def setup_audio_playback(self, sample_rate: int):
-        """设置音频播放"""
-        try:
-            self.audio_player = pyaudio.PyAudio()
-            self.playback_stream = self.audio_player.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=sample_rate,
-                output=True,
-                frames_per_buffer=1024
-            )
-            print(f"🔊 音频播放器已初始化，采样率: {sample_rate}Hz")
-        except Exception as e:
-            print(f"⚠️ 无法初始化音频播放器: {e}")
-
-    def debug_play_audio(self, audio_data: bytes, session_id: str):
-        """调试功能：播放接收到的音频"""
-        if not self.playback_enabled or not self.playback_stream:
-            return
-
-        try:
-            # 只在前几个数据块播放，避免过多输出
-            if hasattr(self, f'played_{session_id}'):
-                if getattr(self, f'played_{session_id}') > 1000:  # 每个会话只播放前3个数据块
-                    return
-            else:
-                setattr(self, f'played_{session_id}', 0)
-
-            setattr(self, f'played_{session_id}', getattr(self, f'played_{session_id}') + 1)
-
-            # 播放音频
-            self.playback_stream.write(audio_data)
-            print(f"▶️ 播放会话 {session_id[:8]}... 的音频数据块")
-
-        except Exception as e:
-            print(f"❌ 音频播放失败: {e}")
+    # def setup_audio_playback(self, sample_rate: int):
+    #     """设置音频播放"""
+    #     try:
+    #         self.audio_player = pyaudio.PyAudio()
+    #         self.playback_stream = self.audio_player.open(
+    #             format=pyaudio.paInt16,
+    #             channels=1,
+    #             rate=sample_rate,
+    #             output=True,
+    #             frames_per_buffer=1024
+    #         )
+    #         print(f"🔊 音频播放器已初始化，采样率: {sample_rate}Hz")
+    #     except Exception as e:
+    #         print(f"⚠️ 无法初始化音频播放器: {e}")
+    #
+    # def debug_play_audio(self, audio_data: bytes, session_id: str):
+    #     """调试功能：播放接收到的音频"""
+    #     if not self.playback_enabled or not self.playback_stream:
+    #         return
+    #
+    #     try:
+    #         # 只在前几个数据块播放，避免过多输出
+    #         if hasattr(self, f'played_{session_id}'):
+    #             if getattr(self, f'played_{session_id}') > 1000:  # 每个会话只播放前3个数据块
+    #                 return
+    #         else:
+    #             setattr(self, f'played_{session_id}', 0)
+    #
+    #         setattr(self, f'played_{session_id}', getattr(self, f'played_{session_id}') + 1)
+    #
+    #         # 播放音频
+    #         self.playback_stream.write(audio_data)
+    #         print(f"▶️ 播放会话 {session_id[:8]}... 的音频数据块")
+    #
+    #     except Exception as e:
+    #         print(f"❌ 音频播放失败: {e}")
 
     def _create_recognizer(self) -> KaldiRecognizer:
         """创建并配置识别器实例"""
@@ -268,7 +268,7 @@ class VoskASRServer:
         return recognizer
 
     def _worker_task(self):
-        """工作线程任务"""
+        """工作线程任务：从任务队列中拿取一个音频数据，放入识别器识别，并将识别结果放在会话中"""
         while True:
             try:
                 task = self.task_queue.get()
@@ -329,14 +329,13 @@ class VoskASRServer:
         return session_id
 
     def process_audio(self, session_id: str, audio_data: bytes):
-        """处理音频数据"""
+        """将识别音频放入识别队列"""
+        # 检查会话是否还存在
         with self.session_lock:
             if session_id not in self.sessions:
                 logger.warning(f"会话不存在: {session_id}")
                 return
 
-        print("开始播放音频....")
-        self.debug_play_audio(audio_data, session_id)
 
         load = 0.0
         try:
@@ -365,7 +364,7 @@ class VoskASRServer:
                 pass
 
     def get_session_results(self, session_id: str) -> Dict:
-        """获取会话结果"""
+        """用于将会话结果从会话对象中取出"""
         with self.session_lock:
             session = self.sessions.get(session_id)
             if not session:
