@@ -144,8 +144,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 from contextlib import asynccontextmanager
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 
+import os
 import pyaudio
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -167,7 +168,7 @@ class VoskASRServer:
             self,
             model_path: str,
             sample_rate: float = 16000.0,
-            max_workers: int = 4,
+            max_workers: Optional[int] = None,
             hotwords: Optional[list] = None
     ):
         """
@@ -181,6 +182,15 @@ class VoskASRServer:
         """
         self.model_path = model_path
         self.sample_rate = sample_rate
+        if max_workers is None:
+            env_workers = os.getenv("ASR_MAX_WORKERS")
+            if env_workers:
+                try:
+                    max_workers = max(1, int(env_workers))
+                except Exception:
+                    max_workers = (os.cpu_count() or 1) + 1
+            else:
+                max_workers = (os.cpu_count() or 1) + 1
         self.max_workers = max_workers
 
         # 添加音频播放功能
@@ -199,17 +209,18 @@ class VoskASRServer:
             logger.info(f"加载热词: {', '.join(self.hotwords[:5])}...")
 
         # 工作线程池
-        self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
-        logger.info(f"初始化线程池，工作线程数: {max_workers}")
+        self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
+        logger.info(f"初始化线程池，工作线程数: {self.max_workers}")
 
         # 会话管理
         self.sessions: Dict[str, Dict] = {}
         self.session_recognizers: Dict[str, KaldiRecognizer] = {}
         self.session_lock = threading.Lock()
         self.session_process_locks: Dict[str, threading.Lock] = {}
+        self.min_chunk_bytes = int(self.sample_rate * 0.2) * 2
 
         # 任务队列
-        self.task_queue = Queue()
+        self.task_queue = Queue(maxsize=self.max_workers * 50)
 
         # 启动工作线程
         self._start_workers()
@@ -311,7 +322,8 @@ class VoskASRServer:
                 "results": [],
                 "partial": "",
                 "last_result": "",
-                "recognizer": recognizer
+                "recognizer": recognizer,
+                "buffer": bytearray()
             }
         logger.info(f"创建新会话: {session_id}")
         return session_id
@@ -323,12 +335,34 @@ class VoskASRServer:
                 logger.warning(f"会话不存在: {session_id}")
                 return
 
-        # 调试：播放音频（可选）
         print("开始播放音频....")
         self.debug_play_audio(audio_data, session_id)
 
-        # 将任务放入队列
-        self.task_queue.put((session_id, audio_data))
+        load = 0.0
+        try:
+            load = self.task_queue.qsize() / float(self.task_queue.maxsize or 1)
+        except Exception:
+            pass
+        target_ms = 300 if load >= 0.8 else (200 if load >= 0.5 else 150)
+        min_bytes = int(self.sample_rate * (target_ms / 1000.0)) * 2
+
+        with self.session_lock:
+            buf = self.sessions[session_id].setdefault("buffer", bytearray())
+            buf.extend(audio_data)
+            if len(buf) < min_bytes:
+                return
+            chunk = bytes(buf)
+            self.sessions[session_id]["buffer"] = bytearray()
+        try:
+            self.task_queue.put_nowait((session_id, chunk))
+        except Full:
+            try:
+                _ = self.task_queue.get_nowait()
+                self.task_queue.task_done()
+                self.task_queue.put_nowait((session_id, chunk))
+                print("⚠️ 背压: 队列已满，丢弃最旧任务以保留最新音频块")
+            except Empty:
+                pass
 
     def get_session_results(self, session_id: str) -> Dict:
         """获取会话结果"""
