@@ -1,3 +1,7 @@
 uvicorn
 fastapi
 vosk
+funasr>=0.4.6
+torch
+python-multipart>=0.0.6
+pydub>=0.25.1
